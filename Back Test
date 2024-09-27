@@ -1,0 +1,94 @@
+import backtrader as bt
+import yfinance as yf
+
+class BreakoutStrategy(bt.Strategy):
+    params = (
+        ('breakout_range', 0.01),  # 1% breakout range
+        ('stop_loss_perc', 0.004),  # 0.4% stop loss to limit risk per trade
+        ('take_profit_perc', 0.012),  # 1.2% take profit for better risk/reward ratio
+        ('sma_period', 20),  # SMA period for trend confirmation
+        ('atr_period', 14),  # ATR period for volatility filter
+        ('atr_multiplier', 1.5),  # ATR multiplier to filter low volatility
+    )
+
+    def __init__(self):
+        # Initialize indicators
+        self.highest = bt.indicators.Highest(self.data.high, period=10)  # Highest high over the last 10 periods
+        self.lowest = bt.indicators.Lowest(self.data.low, period=10)  # Lowest low over the last 10 periods
+        self.sma = bt.indicators.SimpleMovingAverage(self.data.close, period=self.params.sma_period)
+        self.atr = bt.indicators.AverageTrueRange(self.data, period=self.params.atr_period)
+        
+        self.order = None
+        self.daily_loss = 0
+        self.total_loss = 0
+        self.total_profit = 0
+
+    def next(self):
+        # Check daily drawdown limit
+        if self.daily_loss >= 250 or self.total_loss >= 800 or self.total_profit >= 1800:
+            return  # Stop trading if limits or target are hit
+
+        # Only trade if volatility (ATR) is sufficient
+        if self.atr[0] < self.params.atr_multiplier * self.atr[0]:
+            return  # Skip trading if volatility is too low
+        
+        if not self.position:
+            # Buy signal: Breakout above the highest high and above SMA (uptrend)
+            if self.data.close[0] > self.highest[-1] * (1 + self.params.breakout_range) and self.data.close[0] > self.sma[0]:
+                self.order = self.buy()
+                self.sell(exectype=bt.Order.Stop, price=self.data.close[0] * (1 - self.params.stop_loss_perc))
+                self.sell(exectype=bt.Order.Limit, price=self.data.close[0] * (1 + self.params.take_profit_perc))
+            
+            # Sell signal: Breakout below the lowest low and below SMA (downtrend)
+            elif self.data.close[0] < self.lowest[-1] * (1 - self.params.breakout_range) and self.data.close[0] < self.sma[0]:
+                self.order = self.sell()
+                self.buy(exectype=bt.Order.Stop, price=self.data.close[0] * (1 + self.params.stop_loss_perc))
+                self.buy(exectype=bt.Order.Limit, price=self.data.close[0] * (1 - self.params.take_profit_perc))
+
+    def notify_trade(self, trade):
+        if trade.isclosed:
+            pnl = trade.pnl
+            if pnl < 0:
+                self.daily_loss += abs(pnl)
+                self.total_loss += abs(pnl)
+            else:
+                self.total_profit += pnl
+
+    def start(self):
+        self.daily_loss = 0  # Reset daily loss at the start of each day
+
+    def stop(self):
+        self.daily_loss = 0  # Reset at the end of the session
+
+# Fetch intraday data for a US stock (e.g., AAPL)
+data = bt.feeds.PandasData(dataname=yf.download('AAPL', start="2023-01-01", end="2023-09-01", interval='5m'))
+
+# Initialize Cerebro
+cerebro = bt.Cerebro()
+
+# Add data feed to Cerebro
+cerebro.adddata(data)
+
+# Add strategy to Cerebro
+cerebro.addstrategy(BreakoutStrategy)
+
+# Set account size to $20,000
+cerebro.broker.setcash(20000)
+
+# Set commission (low rates typical for prop firms)
+cerebro.broker.setcommission(commission=0.0001)
+
+# Add sizer to control risk per trade (around $80 per trade, less than $250 daily drawdown limit)
+cerebro.addsizer(bt.sizers.PercentSizer, percents=0.4)
+
+# Print starting portfolio value
+print(f'Starting Portfolio Value: {cerebro.broker.getvalue():.2f}')
+
+# Run the strategy
+cerebro.run()
+
+# Print final portfolio value
+print(f'Final Portfolio Value: {cerebro.broker.getvalue():.2f}')
+
+# Plot the results
+cerebro.plot()
